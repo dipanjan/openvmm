@@ -16,10 +16,10 @@ Sandboxing happens in three named, ordered stages:
    worker. It returns a plain-data `SandboxProcessConfig` describing the
    child's launch environment (which Linux `CLONE_NEW*` flags to use, which
    handles stay inheritable, the child's identity, and — on Windows — the LPAC
-   construction data). The caller merges that into whatever process builder it
-   already owns and performs the spawn. This crate depends on neither `mesh`
-   nor `pal`: it decides *what* the launch environment must be; the caller
-   decides *how* to apply it.
+   construction data). The caller passes that prepared configuration intact to
+   the platform process builder, which performs the spawn. This crate depends
+   on neither `mesh` nor `pal`: it decides *what* the launch environment must
+   be; PAL decides *how* to apply it.
 2. **`apply`** — the **first statement of the worker's `main()`**. On Linux the
    worker configures the namespaces it was cloned into, then applies
    `pivot_root`, credential drop, hardening, `no_new_privs`, and optional

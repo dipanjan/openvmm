@@ -283,8 +283,6 @@ pub struct ProcessConfig {
     stderr: Option<File>,
     skip_worker_arg: bool,
     sandbox_profile: Option<sandbox::Profile>,
-    #[cfg(target_os = "linux")]
-    restrict_inherited_fds: bool,
     env_vars: Vec<(OsString, OsString)>,
 }
 
@@ -299,8 +297,6 @@ impl ProcessConfig {
             stderr: None,
             skip_worker_arg: false,
             sandbox_profile: None,
-            #[cfg(target_os = "linux")]
-            restrict_inherited_fds: false,
             env_vars: Vec::new(),
         }
     }
@@ -315,18 +311,8 @@ impl ProcessConfig {
             stderr: None,
             skip_worker_arg: false,
             sandbox_profile: Some(sandbox_profile),
-            #[cfg(target_os = "linux")]
-            restrict_inherited_fds: true,
             env_vars: Vec::new(),
         }
-    }
-
-    /// Restricts inherited Linux file descriptors to the fixed Mesh bootstrap
-    /// layout, independently of whether a sandbox profile is configured.
-    #[cfg(target_os = "linux")]
-    pub fn restrict_inherited_fds(mut self) -> Self {
-        self.restrict_inherited_fds = true;
-        self
     }
 
     /// Sets the process name.
@@ -831,10 +817,6 @@ impl MeshInner {
 
         #[cfg(windows)]
         let child = {
-            if config.sandbox_profile.is_some() {
-                anyhow::bail!("sandboxed Mesh hosts are not supported on Windows");
-            }
-
             let (invitation, handle) = self.node.invite(recv).context("mesh node invite error")?;
             node_id = invitation.node_id();
             let (credentials, directory) = invitation.into_parts();
@@ -870,6 +852,21 @@ impl MeshInner {
 
             if let Some(log_file) = config.stderr.as_ref() {
                 builder.stderr(process::Stdio::Handle(log_file.as_handle()));
+            }
+
+            if let Some(profile) = &config.sandbox_profile {
+                let preparation = sandbox::prepare(
+                    profile,
+                    &sandbox::Identity::default(),
+                    &[(
+                        sandbox::HandleTag(0),
+                        sandbox::RawHandle(directory.as_raw_handle() as usize as u64),
+                    )],
+                )
+                .context("failed to prepare sandboxed Mesh process")?;
+                builder
+                    .apply_sandbox(preparation)
+                    .context("failed to configure sandboxed Mesh process")?;
             }
 
             // Launch the child process on a separate thread to isolate
@@ -927,28 +924,16 @@ impl MeshInner {
                 command.stderr(process::Stdio::Fd(log_file.as_fd()));
             }
 
-            #[cfg(target_os = "linux")]
             if let Some(profile) = &config.sandbox_profile {
-                let preparation = sandbox::prepare(profile, &sandbox::Identity::default(), &[])
-                    .context("failed to prepare sandboxed Mesh process")?;
+                let preparation = sandbox::prepare(
+                    profile,
+                    &sandbox::Identity::default(),
+                    &[(sandbox::HandleTag(0), sandbox::RawHandle(IPC_FD as u64))],
+                )
+                .context("failed to prepare sandboxed Mesh process")?;
                 command
-                    .set_clone_flags(
-                        preparation
-                            .clone_flags
-                            .try_into()
-                            .context("sandbox clone flags do not fit in i32")?,
-                    )
-                    .set_user_namespace_self_map(preparation.map_current_user);
-            }
-
-            #[cfg(not(target_os = "linux"))]
-            if config.sandbox_profile.is_some() {
-                anyhow::bail!("sandboxed Mesh hosts are not supported on this Unix platform");
-            }
-
-            #[cfg(target_os = "linux")]
-            if config.restrict_inherited_fds {
-                command.set_inherited_fd_allowlist([0, 1, 2, IPC_FD]);
+                    .apply_sandbox(preparation)
+                    .context("failed to configure sandboxed Mesh process")?;
             }
 
             // Launch the child process on a separate thread to isolate
@@ -1031,25 +1016,7 @@ mod tests {
     use pal_async::DefaultDriver;
     use pal_async::async_test;
     use pal_async::task::Spawn;
-    #[cfg(target_os = "linux")]
-    use std::ffi::OsString;
-    #[cfg(target_os = "linux")]
-    use std::os::fd::AsFd;
-    #[cfg(target_os = "linux")]
-    use std::os::fd::AsRawFd;
-    #[cfg(target_os = "linux")]
-    use std::os::fd::FromRawFd;
-    #[cfg(target_os = "linux")]
-    use std::os::fd::OwnedFd;
     use test_with_tracing::test;
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn sandboxed_process_config_restricts_inherited_fds() {
-        let config = ProcessConfig::new_with_sandbox("test", sandbox::Profile::deny_all().build());
-        assert!(config.sandbox_profile.is_some());
-        assert!(config.restrict_inherited_fds);
-    }
 
     #[async_test]
     async fn test_listen(driver: DefaultDriver) {
@@ -1084,74 +1051,5 @@ mod tests {
         drop(listener);
 
         mesh.shutdown().await;
-    }
-
-    #[async_test]
-    #[cfg(target_os = "linux")]
-    async fn sandboxed_host_closes_unlisted_fds(_driver: DefaultDriver) {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("fd-allowlist-result");
-        let null = File::open("/dev/null").unwrap();
-        // SAFETY: null is a valid descriptor and the returned descriptor is
-        // uniquely owned.
-        let leaked_fd = unsafe {
-            let fd = libc::fcntl(null.as_fd().as_raw_fd(), libc::F_DUPFD, 100);
-            assert!(fd >= 100);
-            OwnedFd::from_raw_fd(fd)
-        };
-
-        let mesh = Mesh::new("fd-allowlist-test".to_string()).unwrap();
-        mesh.launch_host(
-            ProcessConfig::new("fd-allowlist-test")
-                .restrict_inherited_fds()
-                .process_name(std::env::current_exe().unwrap())
-                .skip_worker_arg(true)
-                .args([
-                    "--exact",
-                    "tests::helper_verify_sandboxed_host_fd_allowlist",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env([
-                    (
-                        OsString::from("MESH_TEST_LEAKED_FD"),
-                        OsString::from(leaked_fd.as_raw_fd().to_string()),
-                    ),
-                    (
-                        OsString::from("MESH_TEST_MARKER"),
-                        marker.clone().into_os_string(),
-                    ),
-                ]),
-            (),
-        )
-        .await
-        .unwrap();
-
-        for _ in 0..500 {
-            if marker.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "closed");
-        mesh.shutdown().await;
-    }
-
-    #[test]
-    #[ignore]
-    #[cfg(target_os = "linux")]
-    fn helper_verify_sandboxed_host_fd_allowlist() {
-        let leaked_fd = std::env::var("MESH_TEST_LEAKED_FD")
-            .unwrap()
-            .parse()
-            .unwrap();
-        // SAFETY: F_GETFD only inspects the numeric descriptor.
-        let result = unsafe { libc::fcntl(leaked_fd, libc::F_GETFD) };
-        assert_eq!(result, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EBADF)
-        );
-        std::fs::write(std::env::var_os("MESH_TEST_MARKER").unwrap(), "closed").unwrap();
     }
 }

@@ -292,7 +292,7 @@ them.
 | **D7** | **Backends are `cfg`-gated modules inside one crate.** | TSD Topic 9 |
 | **D8** | **Broker-and-handles is mandatory.** Workers see resources only as inherited FDs / HANDLEs. Deferred: broker server and seccomp user-notify. | TSD Topic 5 |
 | **D9** | **Handle hygiene is mandatory.** `FD_CLOEXEC` / non-inheritable by default, explicit allowlist, pre-`execve` `close_range` enforcement on Linux, `HANDLE_LIST` on Windows. | TSD Topic 12 |
-| **D10** | **`mesh_process` stays role-agnostic.** OpenVMM owns role selection and passes the resulting `Profile`; Mesh calls `sandbox::prepare` and applies its launch data to PAL. Mesh worker names are not security selectors. | TSD Topic 11 |
+| **D10** | **`mesh_process` stays role-agnostic.** OpenVMM owns role selection and passes the resulting `Profile`; Mesh calls `sandbox::prepare` and passes the prepared launch data intact to PAL. Mesh worker names are not security selectors. | TSD Topic 11 |
 | **D11** | **Mount namespace + bind mounts + `pivot_root` is the primary Linux FS isolation mechanism.** Landlock is a supplement, applied opportunistically with ABI-aware degradation. | TSD Topic 4 ("team preference, load-bearing") |
 | **D12** | **Empty network namespace is the primary Linux network restriction.** Landlock network needs ABI 4 / kernel 6.7, above both baselines. | TSD Topic 4 |
 | **D13** | **Seccomp is opt-in per worker class**, composed from library-contributed requirements plus explicit additions. `RET_KILL_PROCESS` in production. | TSD Topic 3, Topic 4, Topic 7 |
@@ -1943,19 +1943,22 @@ change.
 
 The vestigial `mesh_process::SandboxProfile` callback is removed. A caller
 selects a linked `sandbox::Profile` and passes it to
-`ProcessConfig::new_with_sandbox`; Mesh calls `sandbox::prepare` and applies
-the resulting launch data to PAL. Mesh remains unaware of OpenVMM roles:
+`ProcessConfig::new_with_sandbox`; Mesh calls `sandbox::prepare` and passes
+the resulting launch data intact to PAL. Mesh remains unaware of OpenVMM roles
+and platform-specific launch mechanics:
 
 | Responsibility | Location |
 |---|---|
 | Clone namespace flags and self-ID mapping | `support/pal/src/unix/process.rs`, `support/pal/src/unix/process/linux.rs` |
-| Profile preparation and Mesh bootstrap FD restriction | `support/mesh/mesh_process/src/lib.rs` |
+| Profile preparation and declaration of the Mesh bootstrap handle | `support/mesh/mesh_process/src/lib.rs` |
+| Platform-specific interpretation of prepared launch data and handle restriction | `support/pal/src/{unix,windows}/process.rs` |
 | OpenVMM role and linked-profile selection | `openvmm/openvmm_entry/src/sandbox_profiles.rs` |
 
-`support/pal` carries only mechanism: clone flags and whether the new
-user namespace receives a self-map. It does not know profiles or OpenVMM
-roles. `support/sandbox` computes policy-derived launch data, and
-`mesh_process` adapts that data to PAL.
+`support/pal` carries only mechanism: it consumes the prepared configuration,
+extracts the platform-specific launch fields, and applies them during process
+creation. It does not know profiles or OpenVMM roles. `support/sandbox`
+computes policy-derived launch data, while `mesh_process` passes that data
+through without interpreting Linux clone flags or namespace setup.
 
 ### 13.2 Sequence
 

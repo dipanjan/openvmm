@@ -8,19 +8,18 @@
 //!
 //! The design's original `prepare` reached into the platform process builder
 //! directly. This crate instead computes a **pure-data**
-//! [`SandboxProcessConfig`] and hands it back to the caller, which merges it
-//! into whatever process builder it already owns (in OpenVMM, `mesh_process`'s
-//! `pal` builder). That keeps `support/sandbox` free of any dependency on
-//! `mesh` or `pal`: the sandbox decides *what* the child's launch environment
-//! must be; the caller decides *how* to realize it.
+//! [`SandboxProcessConfig`] and hands it back to the caller, which passes it
+//! intact to the platform process builder. That keeps `support/sandbox` free
+//! of any dependency on `mesh` or `pal`: the sandbox decides *what* the
+//! child's launch environment must be; PAL decides *how* to realize it.
 //!
 //! # Handle hygiene is the caller's job
 //!
 //! There is no grant envelope and no in-crate FD sweep. [`SandboxProcessConfig`]
 //! reports exactly which tagged handles must remain inheritable in
-//! [`SandboxProcessConfig::inherit_handles`]; the caller's process builder is
-//! responsible for mapping those handles to their child descriptor numbers
-//! and closing every other descriptor in the pre-exec child context.
+//! [`SandboxProcessConfig::inherit_handles`]; the platform process builder is
+//! responsible for retaining those handles and its configured standard I/O,
+//! while closing every other descriptor in the pre-exec child context.
 
 use crate::Error;
 use crate::profile::Profile;
@@ -33,12 +32,12 @@ use crate::profile::Profile;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct HandleTag(pub u32);
 
-/// A raw, platform-native handle value: a file-descriptor number on Unix, a
-/// `HANDLE` on Windows.
+/// A child-visible, platform-native handle value: a target file-descriptor
+/// number on Unix, or an inherited `HANDLE` value on Windows.
 ///
-/// Passing a `RawHandle` records intent to inherit; it does not transfer
-/// ownership. The descriptor is inherited across the spawn by the caller's
-/// process builder, and the owner must keep it alive until the child exists.
+/// Passing a `RawHandle` records intent to retain that child-visible value; it
+/// does not transfer ownership of any parent-side source handle. The owner
+/// must keep the source handle alive until the child exists.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct RawHandle(pub u64);
 
@@ -60,12 +59,12 @@ pub struct Identity {
     pub app_container: Option<String>,
 }
 
-/// The result of [`prepare`](crate::prepare): everything the caller must fold
-/// into its process builder before the spawn.
+/// The result of [`prepare`](crate::prepare): everything the platform process
+/// builder needs to apply before the spawn.
 ///
 /// It is deliberately inert plain data — no file descriptors are touched, no
-/// process APIs are called. The caller reads each field and applies it to the
-/// builder it already owns.
+/// process APIs are called. The caller passes the value intact to the platform
+/// process builder.
 #[derive(Debug, Clone, Default)]
 pub struct SandboxProcessConfig {
     /// Linux `CLONE_NEW*` flags to pass to the operation that creates the
@@ -73,15 +72,15 @@ pub struct SandboxProcessConfig {
     /// is active.
     ///
     /// Namespace creation must happen as part of cloning the child so the
-    /// worker starts inside its namespaces. The caller is also responsible for
-    /// establishing the child user namespace's uid/gid mappings before exec.
+    /// worker starts inside its namespaces. The platform process builder also
+    /// establishes the child user namespace's uid/gid mappings before exec.
     pub clone_flags: u64,
     /// Map user and group ID 0 in the Linux user namespace to the spawning
     /// process's effective user and group IDs.
     pub map_current_user: bool,
     /// The tagged handles that must remain inheritable across the spawn. Every
-    /// descriptor *not* listed here must be closed or marked close-on-exec by
-    /// the caller before the child is reached.
+    /// descriptor *not* listed here, or configured as standard I/O by the
+    /// process builder, must be closed before the child is reached.
     pub inherit_handles: Vec<(HandleTag, RawHandle)>,
     /// The uid the child should be launched as, if the identity requested one.
     /// Only a privileged control process can honor this.
@@ -129,19 +128,18 @@ pub struct WindowsPreparation {
 ///
 /// Computes the launch-time configuration for a confined worker and returns it
 /// as plain data. It does **not** mutate any process builder, touch any file
-/// descriptor, or call any process-creation API — the caller merges the
-/// returned [`SandboxProcessConfig`] into its own builder and performs the
-/// spawn.
+/// descriptor, or call any process-creation API — the caller passes the
+/// returned [`SandboxProcessConfig`] to its platform process builder.
 ///
 /// * `profile` — the worker's linked policy. On Linux only its launch-relevant
 ///   bits are consulted here (the worker self-applies the rest in
 ///   [`apply`](crate::apply)); on Windows its entire LPAC portion is reflected
 ///   into [`WindowsPreparation`].
 /// * `identity` — the per-spawn identity; its uid/gid are echoed into the
-///   [`SandboxProcessConfig`] for the caller to set on the child.
+///   [`SandboxProcessConfig`] for the platform process builder to set.
 /// * `handles` — the tagged handles to keep inheritable. They are echoed into
-///   [`SandboxProcessConfig::inherit_handles`]; the caller closes or marks
-///   every other descriptor.
+///   [`SandboxProcessConfig::inherit_handles`]; the platform process builder
+///   closes every other descriptor except its configured standard I/O.
 pub fn prepare(
     profile: &Profile,
     identity: &Identity,

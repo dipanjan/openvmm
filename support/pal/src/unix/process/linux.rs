@@ -6,12 +6,8 @@
 use super::Builder;
 use super::Child;
 use super::FdOp;
-use super::SandboxFailureMode;
 use crate::unix::SyscallResult;
 use crate::unix::errno;
-use caps::CapsHashSet;
-use landlock::RulesetCreated;
-use seccompiler::SeccompFilter;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
@@ -57,20 +53,12 @@ struct CloneContext<'a> {
     result: Option<i32>,
     // TODO: refactor this to contain BorrowedFds
     fd_ops: &'a mut [(i32, FdOp)],
-    sandbox_failure_mode: SandboxFailureMode,
     setsid: bool,
     controlling_terminal: Option<BorrowedFd<'a>>,
     user_namespace_maps: Option<(IdMap, IdMap)>,
     fd_close_ranges: &'a [(u32, u32)],
     uid: Option<libc::uid_t>,
     gid: Option<libc::uid_t>,
-    permitted_capabilities: Option<CapsHashSet>,
-    effective_capabilities: Option<CapsHashSet>,
-    ambient_capabilities: Option<CapsHashSet>,
-    inheritable_capabilities: Option<CapsHashSet>,
-    bounding_capabilities: Option<CapsHashSet>,
-    landlock_rules: Option<RulesetCreated>,
-    seccomp_filter: Option<SeccompFilter>,
 }
 
 impl Builder<'_> {
@@ -79,30 +67,39 @@ impl Builder<'_> {
         envp: &[CString],
         fd_ops: &mut [(i32, FdOp)],
     ) -> io::Result<Child> {
-        if self.linux_builder.self_map_user_namespace
-            && self.linux_builder.clone_flags & libc::CLONE_NEWUSER == 0
-        {
+        let sandbox = self.linux_builder.sandbox.as_ref();
+        let clone_flags: libc::c_int = sandbox
+            .map(|config| {
+                config.clone_flags.try_into().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "sandbox clone flags do not fit in Linux clone flags",
+                    )
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let map_current_user = sandbox.is_some_and(|config| config.map_current_user);
+        if map_current_user && clone_flags & libc::CLONE_NEWUSER == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "user namespace self-mapping requires CLONE_NEWUSER",
             ));
         }
 
-        let mut landlock_rules = None;
-        if let Some(lr) = &self.linux_builder.landlock_rules {
-            landlock_rules = Some(lr.try_clone()?);
-        }
-
         // Build the null-terminated arrays for exec.
         let argv = super::c_slice_to_pointers(&self.argv);
         let envp = super::c_slice_to_pointers(envp);
-        let fd_close_ranges = self
-            .linux_builder
-            .inherited_fd_allowlist
+        let inherited_fds = sandbox.map(inherited_fds).transpose()?;
+        let fd_close_ranges = inherited_fds
             .as_deref()
             .map(fd_close_ranges)
             .transpose()?
             .unwrap_or_default();
+        let sandbox_uid = sandbox.and_then(|config| config.uid);
+        let sandbox_gid = sandbox.and_then(|config| config.gid);
+        let uid = merge_identity(self.uid, sandbox_uid, "user")?;
+        let gid = merge_identity(self.gid, sandbox_gid, "group")?;
 
         let mut context = CloneContext {
             executable: &self.executable,
@@ -110,24 +107,16 @@ impl Builder<'_> {
             envp: &envp,
             result: None,
             fd_ops: &mut *fd_ops,
-            sandbox_failure_mode: self.linux_builder.sandbox_failure_mode,
             setsid: self.linux_builder.setsid,
             controlling_terminal: self.linux_builder.controlling_terminal,
-            user_namespace_maps: self.linux_builder.self_map_user_namespace.then(|| {
+            user_namespace_maps: map_current_user.then(|| {
                 // SAFETY: geteuid and getegid have no safety requirements.
                 let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
                 (IdMap::new(uid), IdMap::new(gid))
             }),
             fd_close_ranges: &fd_close_ranges,
-            uid: self.uid,
-            gid: self.gid,
-            permitted_capabilities: self.linux_builder.permitted_capabilities.clone(),
-            effective_capabilities: self.linux_builder.effective_capabilities.clone(),
-            inheritable_capabilities: self.linux_builder.inheritable_capabilities.clone(),
-            ambient_capabilities: self.linux_builder.ambient_capabilities.clone(),
-            bounding_capabilities: self.linux_builder.bounding_capabilities.clone(),
-            landlock_rules,
-            seccomp_filter: self.linux_builder.seccomp_filter.clone(),
+            uid,
+            gid,
         };
 
         // Use CLONE_VM and CLONE_VFORK so that the new process will share the
@@ -135,7 +124,7 @@ impl Builder<'_> {
         // exits or calls exec.
         //
         // Use CLONE_PIDFD to get an fd back to use for polling.
-        let mut flags = self.linux_builder.clone_flags | libc::CLONE_PIDFD | libc::SIGCHLD;
+        let mut flags = clone_flags | libc::CLONE_PIDFD | libc::SIGCHLD;
 
         if self.linux_builder.vfork {
             flags |= libc::CLONE_VM | libc::CLONE_VFORK;
@@ -212,6 +201,35 @@ impl Builder<'_> {
 
         Ok(child)
     }
+}
+
+fn inherited_fds(config: &sandbox::SandboxProcessConfig) -> io::Result<Vec<i32>> {
+    let mut fds = vec![0, 1, 2];
+    for (_, raw_handle) in &config.inherit_handles {
+        fds.push(raw_handle.0.try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sandbox inherited handle does not fit in a Linux file descriptor",
+            )
+        })?);
+    }
+    fds.sort_unstable();
+    fds.dedup();
+    Ok(fds)
+}
+
+fn merge_identity<T: Copy + Eq>(
+    builder: Option<T>,
+    sandbox: Option<T>,
+    identity: &str,
+) -> io::Result<Option<T>> {
+    if builder.is_some() && sandbox.is_some() && builder != sandbox {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("conflicting process and sandbox {identity} IDs"),
+        ));
+    }
+    Ok(sandbox.or(builder))
 }
 
 struct ChildStackGuard(*mut libc::c_void, usize);
@@ -327,27 +345,6 @@ extern "C" fn clone_cb(context: *mut libc::c_void) -> libc::c_int {
         }
     }
 
-    macro_rules! handle_sandbox_failure {
-        ($m:expr, $r:expr) => {
-            match context.sandbox_failure_mode {
-                SandboxFailureMode::Silent => {}
-                SandboxFailureMode::Warn => {
-                    tracing::warn!($m);
-                }
-                SandboxFailureMode::Error => {
-                    tracing::error!($m);
-                    return $r;
-                }
-            }
-        };
-    }
-
-    if let Some(landlock_rules) = context.landlock_rules.take() {
-        if landlock_rules.restrict_self().is_err() {
-            handle_sandbox_failure!("failed to apply landlock ruleset", libc::ENOTSUP);
-        }
-    }
-
     for &(first, last) in context.fd_close_ranges {
         // SAFETY: close_range takes integer bounds and affects only the
         // calling process's file descriptor table.
@@ -359,41 +356,14 @@ extern "C" fn clone_cb(context: *mut libc::c_void) -> libc::c_int {
     if let Some(gid) = context.gid {
         // SAFETY: setresgid has no safety requirements.
         if unsafe { libc::setresgid(gid, gid, gid) } < 0 {
-            handle_sandbox_failure!("failed to change group id", libc::ENOTSUP);
+            return errno().0;
         }
     }
 
     if let Some(uid) = context.uid {
         // SAFETY: setresuid has no safety requirements.
         if unsafe { libc::setresuid(uid, uid, uid) } < 0 {
-            handle_sandbox_failure!("failed to change user id", libc::ENOTSUP);
-        }
-    }
-
-    macro_rules! set_capabilities {
-        ($t:expr, $v:ident) => {
-            if let Some($v) = &context.$v {
-                if caps::set(None, $t, &$v).is_err() {
-                    handle_sandbox_failure!(
-                        std::concat!("failed to apply ", stringify!($t), " capabilities"),
-                        libc::ENOTSUP
-                    );
-                }
-            }
-        };
-    }
-
-    set_capabilities!(caps::CapSet::Bounding, bounding_capabilities);
-    set_capabilities!(caps::CapSet::Permitted, permitted_capabilities);
-    set_capabilities!(caps::CapSet::Ambient, ambient_capabilities);
-    set_capabilities!(caps::CapSet::Inheritable, inheritable_capabilities);
-    set_capabilities!(caps::CapSet::Effective, effective_capabilities);
-
-    if let Some(seccomp_filter) = context.seccomp_filter.take() {
-        if let Ok(bpf_program) = TryInto::<seccompiler::BpfProgram>::try_into(seccomp_filter) {
-            if seccompiler::apply_filter(&bpf_program).is_err() {
-                handle_sandbox_failure!("failed to apply seccomp profile", libc::ENOTSUP);
-            }
+            return errno().0;
         }
     }
 
@@ -483,6 +453,7 @@ impl AsFd for Child {
 mod tests {
     use super::IdMap;
     use super::fd_close_ranges;
+    use super::inherited_fds;
 
     #[test]
     fn computes_fd_close_ranges() {
@@ -504,6 +475,18 @@ mod tests {
             fd_close_ranges(&[3, 3]).unwrap_err().kind(),
             std::io::ErrorKind::InvalidInput
         );
+    }
+
+    #[test]
+    fn sandbox_handles_become_inherited_fds() {
+        let config = sandbox::SandboxProcessConfig {
+            inherit_handles: vec![
+                (sandbox::HandleTag(1), sandbox::RawHandle(7)),
+                (sandbox::HandleTag(2), sandbox::RawHandle(3)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(inherited_fds(&config).unwrap(), [0, 1, 2, 3, 7]);
     }
 
     #[test]

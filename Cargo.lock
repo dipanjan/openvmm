@@ -4663,7 +4663,6 @@ dependencies = [
  "inspect",
  "inspect_rlimit",
  "inspect_task",
- "libc",
  "mesh",
  "mesh_remote",
  "pal",
@@ -6202,18 +6201,15 @@ dependencies = [
 name = "pal"
 version = "0.0.0"
 dependencies = [
- "caps",
  "fs-err",
  "getrandom 0.4.2",
  "headervec",
- "landlock",
  "libc",
  "ntapi",
  "pal_event",
- "seccompiler",
+ "sandbox",
  "socket2",
  "thiserror 2.0.16",
- "tracing",
  "widestring",
  "winapi",
  "windows 0.62.0",
