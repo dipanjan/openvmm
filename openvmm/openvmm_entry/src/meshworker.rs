@@ -8,6 +8,8 @@ use anyhow::Context;
 use inspect::Inspect;
 use mesh_process::Mesh;
 use mesh_process::ProcessConfig;
+#[cfg(target_os = "linux")]
+use mesh_process::ProcessTraceConfig;
 use mesh_process::try_run_mesh_host;
 use mesh_worker::RegisteredWorkers;
 use mesh_worker::WorkerHost;
@@ -60,10 +62,22 @@ pub(crate) struct VmmMesh {
     local_host: WorkerHost,
     #[inspect(skip)]
     _task: Task<()>,
+    #[cfg(target_os = "linux")]
+    #[inspect(skip)]
+    worker_trace_dir: Option<PathBuf>,
 }
 
 impl VmmMesh {
-    pub fn new(spawn: &impl Spawn, single_process: bool) -> anyhow::Result<Self> {
+    pub fn new(
+        spawn: &impl Spawn,
+        single_process: bool,
+        #[cfg(target_os = "linux")] worker_trace_dir: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            !single_process || worker_trace_dir.is_none(),
+            "worker tracing requires separate worker processes"
+        );
         let mesh = if single_process {
             None
         } else {
@@ -75,6 +89,8 @@ impl VmmMesh {
             mesh,
             local_host,
             _task: task,
+            #[cfg(target_os = "linux")]
+            worker_trace_dir,
         })
     }
 
@@ -115,6 +131,7 @@ impl VmmMesh {
             None
         };
 
+        let name = name.into();
         let host = if let Some(mesh) = &self.mesh {
             let (host, runner) = mesh_worker::worker_host();
             #[cfg(target_os = "linux")]
@@ -123,6 +140,14 @@ impl VmmMesh {
                     .args([format!("{SANDBOX_ROLE_ARG}{}", role.name())])
                     .stderr(log_file),
                 None => ProcessConfig::new(name).stderr(log_file),
+            };
+            #[cfg(target_os = "linux")]
+            let process_config = if let Some(output_dir) = &self.worker_trace_dir {
+                process_config.trace(ProcessTraceConfig {
+                    output_dir: output_dir.clone(),
+                })
+            } else {
+                process_config
             };
             #[cfg(not(target_os = "linux"))]
             let process_config = ProcessConfig::new(name).stderr(log_file);

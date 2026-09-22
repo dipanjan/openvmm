@@ -26,6 +26,7 @@ use std::process::ExitStatus;
 pub struct LinuxBuilder<'a> {
     sandbox: Option<sandbox::SandboxProcessConfig>,
     vfork: bool,
+    trace_before_exec: bool,
     setsid: bool,
     controlling_terminal: Option<BorrowedFd<'a>>,
 }
@@ -263,6 +264,16 @@ impl<'a> Builder<'a> {
             io::ErrorKind::Unsupported,
             "sandboxed process launch is not implemented on this platform",
         ))
+    }
+
+    /// Stops the child immediately before `exec` so a tracer can attach.
+    ///
+    /// This disables `vfork` because a stopped `vfork` child would indefinitely
+    /// block the spawning thread.
+    #[cfg(target_os = "linux")]
+    pub fn set_trace_before_exec(&mut self, trace: bool) -> &mut Self {
+        self.linux_builder.trace_before_exec = trace;
+        self
     }
 
     /// Gets whether the new process will vfork or not.

@@ -1172,7 +1172,12 @@ impl VmService {
         let (notify_send, notify_recv) = mesh::channel();
 
         // Create a VmmMesh for local/in-process workers.
-        let mesh = VmmMesh::new(&self.driver, true)?;
+        let mesh = VmmMesh::new(
+            &self.driver,
+            true,
+            #[cfg(target_os = "linux")]
+            None,
+        )?;
         let vm_host = mesh
             .make_sandboxed_host(SandboxRole::Vm, None)
             .await
