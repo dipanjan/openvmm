@@ -59,7 +59,7 @@ struct CloneContext<'a> {
     fd_close_ranges: &'a [(u32, u32)],
     uid: Option<libc::uid_t>,
     gid: Option<libc::uid_t>,
-    trace_before_exec: bool,
+    trace_seccomp_filter: Option<SeccompFilter>,
 }
 
 impl Builder<'_> {
@@ -118,7 +118,7 @@ impl Builder<'_> {
             fd_close_ranges: &fd_close_ranges,
             uid,
             gid,
-            trace_before_exec: self.linux_builder.trace_before_exec,
+            trace_seccomp_filter: self.linux_builder.trace_seccomp_filter.clone(),
         };
 
         // Use CLONE_VM and CLONE_VFORK so that the new process will share the
@@ -128,7 +128,8 @@ impl Builder<'_> {
         // Use CLONE_PIDFD to get an fd back to use for polling.
         let mut flags = clone_flags | libc::CLONE_PIDFD | libc::SIGCHLD;
 
-        let using_vfork = self.linux_builder.vfork && !self.linux_builder.trace_before_exec;
+        let using_vfork =
+            self.linux_builder.vfork && self.linux_builder.trace_seccomp_filter.is_none();
         if using_vfork {
             flags |= libc::CLONE_VM | libc::CLONE_VFORK;
         }
@@ -370,11 +371,19 @@ extern "C" fn clone_cb(context: *mut libc::c_void) -> libc::c_int {
         }
     }
 
-    if context.trace_before_exec {
+    if context.trace_seccomp_filter.is_some() {
         // SAFETY: raise has no memory-safety requirements. The parent requested
         // this stop and disabled vfork so it can attach a ptrace supervisor.
         if unsafe { libc::raise(libc::SIGSTOP) } < 0 {
             return errno().0;
+        }
+    }
+
+    if let Some(seccomp_filter) = context.trace_seccomp_filter.take() {
+        if let Ok(bpf_program) = TryInto::<seccompiler::BpfProgram>::try_into(seccomp_filter) {
+            if seccompiler::apply_filter(&bpf_program).is_err() {
+                return libc::ENOTSUP;
+            }
         }
     }
 

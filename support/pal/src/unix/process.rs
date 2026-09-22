@@ -26,7 +26,7 @@ use std::process::ExitStatus;
 pub struct LinuxBuilder<'a> {
     sandbox: Option<sandbox::SandboxProcessConfig>,
     vfork: bool,
-    trace_before_exec: bool,
+    trace_seccomp_filter: Option<SeccompFilter>,
     setsid: bool,
     controlling_terminal: Option<BorrowedFd<'a>>,
 }
@@ -266,13 +266,14 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// Stops the child immediately before `exec` so a tracer can attach.
+    /// Stops the child before installing a tracing seccomp filter and
+    /// executing the new image so a ptrace supervisor can attach.
     ///
     /// This disables `vfork` because a stopped `vfork` child would indefinitely
     /// block the spawning thread.
     #[cfg(target_os = "linux")]
-    pub fn set_trace_before_exec(&mut self, trace: bool) -> &mut Self {
-        self.linux_builder.trace_before_exec = trace;
+    pub fn set_trace_seccomp_filter(&mut self, seccomp_filter: SeccompFilter) -> &mut Self {
+        self.linux_builder.trace_seccomp_filter = Some(seccomp_filter);
         self
     }
 
