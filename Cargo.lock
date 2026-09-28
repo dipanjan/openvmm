@@ -7340,6 +7340,9 @@ dependencies = [
  "landlock",
  "libc",
  "seccompiler",
+ "serde",
+ "serde_json",
+ "tempfile",
  "test_with_tracing",
  "thiserror 2.0.16",
  "tracing",
@@ -7353,6 +7356,7 @@ dependencies = [
  "clap",
  "fs-err",
  "libc",
+ "sandbox",
  "serde_json",
  "tempfile",
 ]
