@@ -3,10 +3,6 @@
 > **Status:** *Draft for team review.*
 > **Audience:** OpenVMM / OpenHCL maintainers, security reviewers, and
 > implementers of the `support/sandbox` crate.
-> **Supersedes:** the implementation choices in
-> [`Sandbox_architecture.md`](./Sandbox_architecture.md).
-> **Implements:** the decisions in
-> [`Sandbox_tsd.md`](./Sandbox_tsd.md) (the TSD).
 > **Complements:** [`uid_gid_sandboxing.md`](./uid_gid_sandboxing.md),
 > which details the UID/GID strategy consumed by `Grant.target_uid`.
 >
