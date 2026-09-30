@@ -61,23 +61,12 @@ worker that refuses to start, not a worker that runs unconfined.
 
 ### 1.2 Non-goals
 
-Carried forward from TSD §Non-goals, plus additions:
-
-- Replacing Mesh as the IPC mechanism.
-- Turning OpenVMM / OpenHCL into a microkernel.
-- Sandboxing single-process / dev-mode launches. The existing
-  `Mesh::new(single_process = true)` path
-  (`openvmm/openvmm_entry/src/meshworker.rs:37-50`) remains available
-  and unsandboxed.
+- Sandboxing single-process launches
 - Replacing operator-deployed MAC systems (SELinux, AppArmor, WDAC).
   These are complementary; we document recommended policies in
   `Guide/` but do not author them at runtime.
 - Sandboxing **non-Mesh subprocess launches** in v1. See
   [§13.4](#134-non-mesh-spawn-sites).
-- macOS parity. A stretch goal and an explicit non-blocker.
-- Being a substitute for trust-boundary input validation. The existing
-  `tracelimit` / `thiserror` / `open_enum!` discipline remains
-  mandatory and is unaffected by this design.
 
 ### 1.3 Terminology
 
