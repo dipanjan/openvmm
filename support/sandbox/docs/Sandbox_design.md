@@ -45,8 +45,7 @@ platform-neutral vocabulary** that worker authors can write and
 security reviewers can audit, and is enforced by **first-class OS
 primitives** on both Linux and Windows.
 
-Concretely, a worker that has been compromised through its device
-emulation surface must be unable to:
+Concretely, a worker that has been compromised must be unable to:
 
 - open any filesystem path the control process did not grant it,
 - create any network connection it was not granted,
