@@ -8,6 +8,7 @@ use super::Child;
 use super::FdOp;
 use crate::unix::SyscallResult;
 use crate::unix::errno;
+use seccompiler::SeccompFilter;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;

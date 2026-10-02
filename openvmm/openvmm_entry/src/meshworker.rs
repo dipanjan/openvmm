@@ -144,7 +144,6 @@ impl VmmMesh {
             None
         };
 
-        let name = name.into();
         let host = if let Some(mesh) = &self.mesh {
             let (host, runner) = mesh_worker::worker_host();
             #[cfg(target_os = "linux")]

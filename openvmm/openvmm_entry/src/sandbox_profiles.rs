@@ -24,12 +24,16 @@ impl SandboxRole {
                 .read("/usr")
                 .read("/etc")
                 .read("/dev")
-                .syscalls(sandbox::Syscalls::Deny(&["kill"]))
+                .syscalls(sandbox::Syscalls::Deny(vec!["kill".to_string()]))
                 .build(),
             Self::Tpm => sandbox::Profile::deny_all()
                 .name(self.name())
                 .network(sandbox::Network::None)
-                .syscalls(sandbox::Syscalls::Deny(&["kill", "tkill", "tgkill"]))
+                .syscalls(sandbox::Syscalls::Deny(vec![
+                    "kill".to_string(),
+                    "tkill".to_string(),
+                    "tgkill".to_string(),
+                ]))
                 .build(),
         }
     }

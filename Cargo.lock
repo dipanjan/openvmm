@@ -6245,6 +6245,7 @@ dependencies = [
  "ntapi",
  "pal_event",
  "sandbox",
+ "seccompiler",
  "socket2",
  "thiserror 2.0.16",
  "widestring",

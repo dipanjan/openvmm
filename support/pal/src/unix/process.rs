@@ -20,6 +20,9 @@ use std::os::unix::prelude::*;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+#[cfg(target_os = "linux")]
+use seccompiler::SeccompFilter;
+
 /// A container for linux specific builder options.
 #[cfg(target_os = "linux")]
 #[derive(Default)]
