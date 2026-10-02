@@ -88,10 +88,8 @@ impl VmmMesh {
         #[cfg(target_os = "linux")]
         let worker_trace = worker_trace_dir
             .map(|output_dir| {
-                let deny_syscalls = sandbox::load_platform_syscall_denylist()
-                    .context("failed to load worker trace syscall denylist")?
-                    .into_iter()
-                    .map(|entry| entry.name)
+                let deny_syscalls = sandbox::platform_syscall_denylist()
+                    .map(|entry| entry.name.to_string())
                     .collect::<Vec<_>>();
                 let syscalls =
                     pal_tracer::resolve_trace_syscalls(&deny_syscalls, sandbox::nr_for_name)?;
