@@ -74,8 +74,7 @@ previous step:
 ```shell
 target/debug/sandbox_profiler \
     <TRACE_DIR> <WORKER> \
-    [--output-dir <OUTPUT_DIR>] \
-    [--syscall-denylist <PATH>]
+    [--output-dir <OUTPUT_DIR>]
 ```
 
 `<TRACE_DIR>` is the directory created in the trace-collection step. The
@@ -88,8 +87,8 @@ trace files.
 `--output-dir <OUTPUT_DIR>` is optional. Without it, the profile builder writes
 the generated profile to `<TRACE_DIR>/<WORKER>_worker.rs`.
 
-`--syscall-denylist <PATH>` is optional. Without it, the profile builder uses
-the platform configuration selected by the `sandbox` crate.
+The profile builder uses the platform denylist exposed by the `sandbox`
+crate.
 
 The generated profile is a starting point and must be reviewed before it is
 integrated into the worker.

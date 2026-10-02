@@ -72,12 +72,9 @@ pub use profile::Profile;
 pub use profile::Restrictions;
 pub use profile::RestrictionsBuilder;
 pub use profile::Syscalls;
-pub use syscall_denylist::SyscallDenylistClassification;
-pub use syscall_denylist::SyscallDenylistEntry;
-pub use syscall_denylist::SyscallDenylistError;
-pub use syscall_denylist::load_platform_syscall_denylist;
-pub use syscall_denylist::load_syscall_denylist;
-pub use syscall_denylist::platform_syscall_denylist_path;
+pub use syscall_denylist::DeniedSyscall;
+pub use syscall_denylist::Enforcement;
+pub use syscall_denylist::platform_syscall_denylist;
 
 #[cfg(target_os = "linux")]
 pub use unix::seccomp::nr_for_name;

@@ -14,8 +14,7 @@ use sandbox::Syscalls;
 use sandbox::profiles;
 
 fn main() -> anyhow::Result<()> {
-    let syscall_denials = sandbox::load_platform_syscall_denylist()?
-        .into_iter()
+    let syscall_denials = sandbox::platform_syscall_denylist()
         .map(|entry| entry.name)
         .collect::<Vec<_>>();
     let profile = profiles::minimal()

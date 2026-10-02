@@ -3282,7 +3282,13 @@ mod tests {
                 "--single-process",
             ])
             .unwrap();
-            let mesh = VmmMesh::new(&driver, true).unwrap();
+            let mesh = VmmMesh::new(
+                &driver,
+                true,
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .unwrap();
 
             let (config, _resources) = vm_config_from_command_line(driver, &mesh, &opt)
                 .await
@@ -3319,7 +3325,13 @@ mod tests {
                 "--single-process",
             ])
             .unwrap();
-            let mesh = VmmMesh::new(&driver, true).unwrap();
+            let mesh = VmmMesh::new(
+                &driver,
+                true,
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .unwrap();
 
             let (config, _resources) = vm_config_from_command_line(driver, &mesh, &opt)
                 .await
@@ -3358,7 +3370,13 @@ mod tests {
                 "--single-process",
             ])
             .unwrap();
-            let mesh = VmmMesh::new(&driver, true).unwrap();
+            let mesh = VmmMesh::new(
+                &driver,
+                true,
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .unwrap();
 
             let error = vm_config_from_command_line(driver, &mesh, &opt)
                 .await
@@ -3392,7 +3410,13 @@ mod tests {
                 "--single-process",
             ])
             .unwrap();
-            let mesh = VmmMesh::new(&driver, true).unwrap();
+            let mesh = VmmMesh::new(
+                &driver,
+                true,
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .unwrap();
 
             let error = vm_config_from_command_line(driver, &mesh, &opt)
                 .await

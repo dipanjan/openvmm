@@ -22,10 +22,6 @@ struct Options {
     /// Override the output directory. Defaults to TRACE_DIR.
     #[arg(long)]
     output_dir: Option<PathBuf>,
-
-    /// Override the platform syscall denylist JSON file.
-    #[arg(long)]
-    syscall_denylist: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -37,14 +33,9 @@ fn main() -> anyhow::Result<()> {
         trace_dir: options.trace_dir,
         worker: options.worker,
         output_dir,
-        syscall_denylist_path: options.syscall_denylist,
     })?;
 
     println!("generated profile: {}", trace_report.profile_path.display());
-    println!(
-        "syscall denylist: {}",
-        trace_report.syscall_denylist_path.display()
-    );
     println!("trace files: {}", trace_report.trace_files.len());
 
     if trace_report.observed_filesystem.is_empty() {

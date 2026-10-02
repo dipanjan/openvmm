@@ -38,8 +38,6 @@ pub struct TraceOptions {
     pub worker: String,
     /// Directory where the generated Rust source file is written.
     pub output_dir: PathBuf,
-    /// Optional syscall denylist JSON path. Uses the current platform's file when omitted.
-    pub syscall_denylist_path: Option<PathBuf>,
 }
 
 /// Summary of a generated profile.
@@ -47,8 +45,6 @@ pub struct TraceOptions {
 pub struct TraceReport {
     /// Generated Rust source file.
     pub profile_path: PathBuf,
-    /// Syscall denylist JSON file used to generate the profile.
-    pub syscall_denylist_path: PathBuf,
     /// Trace files consumed.
     pub trace_files: Vec<PathBuf>,
 
@@ -100,14 +96,12 @@ pub fn build_profile(trace_options: &TraceOptions) -> anyhow::Result<TraceReport
     ensure!(!worker_file_name.is_empty(), "worker name is empty");
     let rust_identifier = sanitize_rust_identifier(&trace_options.worker);
     let module_name = format!("{rust_identifier}_worker");
-    let syscall_denylist_path = trace_options
-        .syscall_denylist_path
-        .clone()
-        .map(Ok)
-        .unwrap_or_else(sandbox::platform_syscall_denylist_path)?;
-    let default_syscall_denials = sandbox::load_syscall_denylist(&syscall_denylist_path)?
-        .into_iter()
-        .map(|entry| entry.name)
+    let syscall_denylist = sandbox::platform_syscall_denylist()
+        .copied()
+        .collect::<Vec<_>>();
+    let default_syscall_denials = syscall_denylist
+        .iter()
+        .map(|entry| entry.name.to_string())
         .collect::<Vec<_>>();
     #[cfg(target_os = "linux")]
     pal_tracer::validate_trace_syscalls(&default_syscall_denials, sandbox::nr_for_name)?;
@@ -133,16 +127,15 @@ pub fn build_profile(trace_options: &TraceOptions) -> anyhow::Result<TraceReport
         &module_name,
         &trace_files,
         &trace_analysis,
-        &default_syscall_denials,
+        &syscall_denylist,
     );
     fs_err::write(&profile_path, source)
         .with_context(|| format!("failed to write {}", profile_path.display()))?;
-    let policy_syscalls = generated_syscall_denials(&default_syscall_denials, &trace_analysis);
+    let policy_syscalls = generated_syscall_denials(&syscall_denylist, &trace_analysis);
     let policy_network = trace_analysis.policy_network;
 
     Ok(TraceReport {
         profile_path,
-        syscall_denylist_path,
         trace_files,
         observed_filesystem: trace_analysis.observed_filesystem.into_iter().collect(),
         observed_network: trace_analysis.observed_network.into_iter().collect(),
@@ -607,11 +600,11 @@ fn render_profile(
     function_name: &str,
     trace_files: &[PathBuf],
     trace_analysis: &TraceAnalysis,
-    default_syscall_denials: &[String],
+    syscall_denylist: &[sandbox::DeniedSyscall],
 ) -> String {
     // Include the observed accesses and omitted grants beside the generated
     // policy so a reviewer can compare the policy with its trace evidence.
-    let generated_denials = generated_syscall_denials(default_syscall_denials, trace_analysis);
+    let generated_denials = generated_syscall_denials(syscall_denylist, trace_analysis);
     let generated_network = trace_analysis.policy_network;
     let mut source = String::new();
     writeln!(source, "// Copyright (c) Microsoft Corporation.").unwrap();
@@ -654,7 +647,7 @@ fn render_profile(
     write_comment_list(
         &mut source,
         "Syscalls denied by policy but used by the worker",
-        observed_policy_denials(default_syscall_denials, trace_analysis),
+        observed_policy_denials(syscall_denylist, trace_analysis),
     );
     writeln!(source).unwrap();
     writeln!(source, "use crate::Builder;").unwrap();
@@ -718,28 +711,31 @@ fn write_comment_list(
 }
 
 fn generated_syscall_denials(
-    default_syscall_denials: &[String],
+    syscall_denylist: &[sandbox::DeniedSyscall],
     trace_analysis: &TraceAnalysis,
 ) -> Vec<String> {
-    // If the worker used a syscall from the denylist, do not emit that denial:
-    // it would block behavior required by the recorded run.
-    default_syscall_denials
+    // Mandatory denials remain enforced. Optional denials are omitted when the
+    // trace proves that the worker requires the syscall.
+    syscall_denylist
         .iter()
-        .filter(|name| !syscall_was_observed(name, trace_analysis))
-        .cloned()
+        .filter(|entry| {
+            entry.enforcement == sandbox::Enforcement::Mandatory
+                || !syscall_was_observed(entry.name, trace_analysis)
+        })
+        .map(|entry| entry.name.to_string())
         .collect()
 }
 
 fn observed_policy_denials(
-    default_syscall_denials: &[String],
+    syscall_denylist: &[sandbox::DeniedSyscall],
     trace_analysis: &TraceAnalysis,
 ) -> Vec<String> {
     // List denylisted syscalls used by the worker so reviewers can decide
     // whether to change the worker or the denylist.
-    default_syscall_denials
+    syscall_denylist
         .iter()
-        .filter(|name| syscall_was_observed(name, trace_analysis))
-        .cloned()
+        .filter(|entry| syscall_was_observed(entry.name, trace_analysis))
+        .map(|entry| entry.name.to_string())
         .collect()
 }
 
@@ -804,21 +800,7 @@ mod tests {
     fn generates_profile_from_current_trace_schema() {
         let temp = tempfile::tempdir().unwrap();
         let traces = temp.path().join("traces");
-        let denylist = temp.path().join("denylist.json");
         fs_err::create_dir_all(&traces).unwrap();
-        fs_err::write(
-            &denylist,
-            r#"{
-                "denied_syscalls": [
-                    {
-                        "name": "kill",
-                        "classification": "optional",
-                        "reason": "Test configured syscall tracing."
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
         fs_err::write(
             traces.join("worker-vm.42.jsonl"),
             concat!(
@@ -831,7 +813,7 @@ mod tests {
                 "\"args\":[4,0,16,0,0,0],",
                 "\"decoded_args\":{\"socket_address\":{\"family\":\"AF_INET\",",
                 "\"address\":\"127.0.0.1\",\"port\":8080}},\"result\":0}\n",
-                "{\"event\":\"syscall\",\"syscall\":\"kill\",\"sys_nr\":62,",
+                "{\"event\":\"syscall\",\"syscall\":\"keyctl\",\"sys_nr\":250,",
                 "\"args\":[42,15,0,0,0,0],\"decoded_args\":null,\"result\":0}\n",
                 "{\"event\":\"syscall\",\"syscall\":\"read\",\"sys_nr\":0,",
                 "\"args\":[0,0,0,0,0,0],\"decoded_args\":null,\"result\":0}\n",
@@ -846,11 +828,9 @@ mod tests {
             trace_dir: traces,
             worker: "vm".to_string(),
             output_dir: temp.path().to_path_buf(),
-            syscall_denylist_path: Some(denylist.clone()),
         })
         .unwrap();
 
-        assert_eq!(trace_report.syscall_denylist_path, denylist);
         assert_eq!(
             trace_report.policy_read_paths,
             vec![PathBuf::from("/usr/lib")]
@@ -871,7 +851,7 @@ mod tests {
         assert!(generated.contains("Observed network accesses"));
         assert!(generated.contains("Observed syscalls"));
         assert!(
-            generated.contains("Syscalls denied by policy but used by the worker:\n//! - kill")
+            generated.contains("Syscalls denied by policy but used by the worker:\n//! - keyctl")
         );
         assert!(!generated.contains("Configured syscall denial list"));
         assert!(!generated.contains("Generated syscall denial list"));
@@ -883,45 +863,35 @@ mod tests {
             trace_report.observed_syscalls,
             vec![
                 "connect".to_string(),
-                "kill".to_string(),
+                "keyctl".to_string(),
                 "openat".to_string(),
                 "socket".to_string()
             ]
         );
-        assert!(trace_report.policy_syscalls.is_empty());
+        assert!(!trace_report.policy_syscalls.contains(&"keyctl".to_string()));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn rejects_unrecognized_configured_syscall_before_reading_traces() {
-        let temp = tempfile::tempdir().unwrap();
-        let denylist = temp.path().join("denylist.json");
-        fs_err::write(
-            &denylist,
-            r#"{
-                "denied_syscalls": [
-                    {
-                        "name": "not_a_syscall",
-                        "classification": "optional",
-                        "reason": "Test unsupported syscall validation."
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
+    fn mandatory_denials_remain_when_observed() {
+        let mut trace_analysis = TraceAnalysis::default();
+        trace_analysis.observed_syscalls.insert("kill".to_string());
+        let denylist = [
+            sandbox::DeniedSyscall {
+                name: "kill",
+                enforcement: sandbox::Enforcement::Mandatory,
+                reason: None,
+            },
+            sandbox::DeniedSyscall {
+                name: "tkill",
+                enforcement: sandbox::Enforcement::Optional,
+                reason: None,
+            },
+        ];
+        trace_analysis.observed_syscalls.insert("tkill".to_string());
 
-        let error = build_profile(&TraceOptions {
-            trace_dir: temp.path().to_path_buf(),
-            worker: "vm".to_string(),
-            output_dir: temp.path().to_path_buf(),
-            syscall_denylist_path: Some(denylist),
-        })
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("parsing support needs to be added")
+        assert_eq!(
+            generated_syscall_denials(&denylist, &trace_analysis),
+            ["kill".to_string()]
         );
     }
 
