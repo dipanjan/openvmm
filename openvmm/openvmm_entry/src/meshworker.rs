@@ -14,6 +14,8 @@ use mesh_worker::WorkerHost;
 use openvmm_defs::entrypoint::MeshHostParams;
 use pal_async::task::Spawn;
 use pal_async::task::Task;
+#[cfg(target_os = "linux")]
+use pal_tracer::TraceConfig;
 use std::path::PathBuf;
 
 use crate::sandbox_profiles::SandboxRole;
@@ -60,10 +62,22 @@ pub(crate) struct VmmMesh {
     local_host: WorkerHost,
     #[inspect(skip)]
     _task: Task<()>,
+    #[cfg(target_os = "linux")]
+    #[inspect(skip)]
+    worker_trace: Option<TraceConfig>,
 }
 
 impl VmmMesh {
-    pub fn new(spawn: &impl Spawn, single_process: bool) -> anyhow::Result<Self> {
+    pub fn new(
+        spawn: &impl Spawn,
+        single_process: bool,
+        #[cfg(target_os = "linux")] worker_trace_dir: Option<PathBuf>,
+    ) -> anyhow::Result<Self> {
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            !single_process || worker_trace_dir.is_none(),
+            "worker tracing requires separate worker processes"
+        );
         let mesh = if single_process {
             None
         } else {
@@ -71,10 +85,25 @@ impl VmmMesh {
         };
         let (local_host, runner) = mesh_worker::worker_host();
         let task = spawn.spawn("worker-host", runner.run(RegisteredWorkers));
+        #[cfg(target_os = "linux")]
+        let worker_trace = worker_trace_dir
+            .map(|output_dir| {
+                let deny_syscalls = sandbox::load_platform_syscall_denylist()
+                    .context("failed to load worker trace syscall denylist")?
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>();
+                let syscalls =
+                    pal_tracer::resolve_trace_syscalls(&deny_syscalls, sandbox::nr_for_name)?;
+                Ok::<_, anyhow::Error>(TraceConfig::new(output_dir, "worker", syscalls))
+            })
+            .transpose()?;
         Ok(Self {
             mesh,
             local_host,
             _task: task,
+            #[cfg(target_os = "linux")]
+            worker_trace,
         })
     }
 
@@ -123,6 +152,12 @@ impl VmmMesh {
                     .args([format!("{SANDBOX_ROLE_ARG}{}", role.name())])
                     .stderr(log_file),
                 None => ProcessConfig::new(name).stderr(log_file),
+            };
+            #[cfg(target_os = "linux")]
+            let process_config = if let Some(trace) = &self.worker_trace {
+                process_config.trace(trace.clone())
+            } else {
+                process_config
             };
             #[cfg(not(target_os = "linux"))]
             let process_config = ProcessConfig::new(name).stderr(log_file);

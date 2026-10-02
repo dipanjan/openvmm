@@ -8,6 +8,7 @@ use super::Child;
 use super::FdOp;
 use crate::unix::SyscallResult;
 use crate::unix::errno;
+use seccompiler::SeccompFilter;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
@@ -59,6 +60,7 @@ struct CloneContext<'a> {
     fd_close_ranges: &'a [(u32, u32)],
     uid: Option<libc::uid_t>,
     gid: Option<libc::uid_t>,
+    trace_seccomp_filter: Option<SeccompFilter>,
 }
 
 impl Builder<'_> {
@@ -117,6 +119,7 @@ impl Builder<'_> {
             fd_close_ranges: &fd_close_ranges,
             uid,
             gid,
+            trace_seccomp_filter: self.linux_builder.trace_seccomp_filter.clone(),
         };
 
         // Use CLONE_VM and CLONE_VFORK so that the new process will share the
@@ -126,7 +129,12 @@ impl Builder<'_> {
         // Use CLONE_PIDFD to get an fd back to use for polling.
         let mut flags = clone_flags | libc::CLONE_PIDFD | libc::SIGCHLD;
 
-        if self.linux_builder.vfork {
+        // Tracing stops the child before exec so the parent can attach ptrace.
+        // Using vfork would deadlock: the parent waits for exec while the child
+        // waits for the parent to resume it.
+        let using_vfork =
+            self.linux_builder.vfork && self.linux_builder.trace_seccomp_filter.is_none();
+        if using_vfork {
             flags |= libc::CLONE_VM | libc::CLONE_VFORK;
         }
 
@@ -186,7 +194,7 @@ impl Builder<'_> {
         // This can only be done if we are vforking, without sharing another
         // type of status object we can't determine if the execve failed or
         // the process failed during early initialization.
-        if self.linux_builder.vfork && context.result != Some(0) {
+        if using_vfork && context.result != Some(0) {
             // The new process failed without successfully calling execve. Reap
             // it and return the associated error code (which may come from
             // context or from the exit code).
@@ -364,6 +372,23 @@ extern "C" fn clone_cb(context: *mut libc::c_void) -> libc::c_int {
         // SAFETY: setresuid has no safety requirements.
         if unsafe { libc::setresuid(uid, uid, uid) } < 0 {
             return errno().0;
+        }
+    }
+
+    // Stop before installing the tracing filter and executing the worker so the
+    // parent can attach ptrace and capture syscalls from the start of execution.
+    if context.trace_seccomp_filter.is_some() {
+        // SAFETY: raise has no memory-safety requirements.
+        if unsafe { libc::raise(libc::SIGSTOP) } < 0 {
+            return errno().0;
+        }
+    }
+
+    if let Some(seccomp_filter) = context.trace_seccomp_filter.take() {
+        if let Ok(bpf_program) = TryInto::<seccompiler::BpfProgram>::try_into(seccomp_filter) {
+            if seccompiler::apply_filter(&bpf_program).is_err() {
+                return libc::ENOTSUP;
+            }
         }
     }
 
